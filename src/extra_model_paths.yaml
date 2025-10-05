@@ -17,3 +17,5 @@ runpod_worker_comfy:
   ultralytics: models/ultralytics/
   vitmatte: models/vitmatte/
   DiffuEraser: models/DiffuEraser/
+
+#
