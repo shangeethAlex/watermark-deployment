@@ -16,3 +16,4 @@ runpod_worker_comfy:
   mediapipe: models/mediapipe/
   ultralytics: models/ultralytics/
   vitmatte: models/vitmatte/
+  DiffuEraser: models/DiffuEraser/
