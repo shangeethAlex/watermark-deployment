@@ -8,7 +8,7 @@ import os
 import requests
 import base64
 from io import BytesIO
-
+####
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -41,11 +41,11 @@ def validate_input(job_input):
     images = job_input.get("images")
     if images is not None:
         if not isinstance(images, list) or not all(
-            "name" in image and "image" in image for image in images
+            any(k in image for k in ("image", "url")) and "name" in image for image in images
         ):
             return (
                 None,
-                "'images' must be a list of objects with 'name' and 'image' keys",
+                "'images' must be a list of objects with 'name' and either 'image' (base64) or 'url'",
             )
 
     return {"workflow": workflow, "images": images}, None
@@ -71,40 +71,67 @@ def check_server(url, retries=500, delay=50):
 
 
 # ==========================================
-# IMAGE UPLOAD
+# IMAGE / VIDEO UPLOAD (Base64 or URL)
 # ==========================================
 def upload_images(images):
-    """Upload list of base64-encoded images to ComfyUI /upload/image endpoint."""
+    """Upload files (Base64 or via URL) to ComfyUI /upload/image endpoint."""
     if not images:
-        return {"status": "success", "message": "No images to upload", "details": []}
+        return {"status": "success", "message": "No input files to upload", "details": []}
 
     responses = []
     upload_errors = []
 
-    print("runpod-worker-comfy - uploading image(s)...")
+    print("runpod-worker-comfy - uploading input file(s)...")
 
     for image in images:
-        name = image["name"]
-        image_data = image["image"]
-        blob = base64.b64decode(image_data)
+        name = image.get("name")
+        blob = None
 
-        files = {
-            "image": (name, BytesIO(blob), "image/png"),
-            "overwrite": (None, "true"),
-        }
+        try:
+            # --- Case 1: URL-based upload ---
+            if "url" in image:
+                url = image["url"]
+                print(f"Downloading input from URL: {url}")
+                with requests.get(url, stream=True) as r:
+                    if r.status_code == 200:
+                        # Stream download to avoid memory overflow
+                        temp_path = f"/tmp/{name}"
+                        with open(temp_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                                f.write(chunk)
+                        blob = open(temp_path, "rb").read()
+                    else:
+                        upload_errors.append(f"Failed to download {name}: HTTP {r.status_code}")
+                        continue
 
-        response = requests.post(f"http://{COMFY_HOST}/upload/image", files=files)
-        if response.status_code != 200:
-            upload_errors.append(f"Error uploading {name}: {response.text}")
-        else:
-            responses.append(f"Successfully uploaded {name}")
+            # --- Case 2: Base64-based upload ---
+            elif "image" in image:
+                blob = base64.b64decode(image["image"])
+
+            else:
+                upload_errors.append(f"No valid 'url' or 'image' found for {name}")
+                continue
+
+            files = {
+                "image": (name, BytesIO(blob), "application/octet-stream"),
+                "overwrite": (None, "true"),
+            }
+
+            response = requests.post(f"http://{COMFY_HOST}/upload/image", files=files)
+            if response.status_code != 200:
+                upload_errors.append(f"Error uploading {name}: {response.text}")
+            else:
+                responses.append(f"✅ Uploaded {name}")
+
+        except Exception as e:
+            upload_errors.append(f"Error processing {name}: {str(e)}")
 
     if upload_errors:
         print("runpod-worker-comfy - upload completed with errors")
-        return {"status": "error", "message": "Some images failed", "details": upload_errors}
+        return {"status": "error", "message": "Some files failed to upload", "details": upload_errors}
 
-    print("runpod-worker-comfy - all images uploaded successfully")
-    return {"status": "success", "message": "All images uploaded successfully", "details": responses}
+    print("runpod-worker-comfy - all input files uploaded successfully")
+    return {"status": "success", "message": "All inputs uploaded successfully", "details": responses}
 
 
 # ==========================================
@@ -122,7 +149,7 @@ def get_history(prompt_id):
     with urllib.request.urlopen(f"http://{COMFY_HOST}/history/{prompt_id}") as response:
         return json.loads(response.read())
 
-
+##
 # ==========================================
 # UTILS
 # ==========================================
@@ -135,10 +162,10 @@ def base64_encode(file_path):
 # ==========================================
 # PROCESS OUTPUT FILES (MULTI-OUTPUT SUPPORT)
 # ==========================================
-def process_output_images(outputs, job_id):
+def process_output_files(outputs, job_id):
     """
     Collects all generated image/video files and returns URLs or base64 strings.
-    Supports multiple outputs (e.g., AnimateDiff_00001.mp4 and AnimateDiff_00001-audio.mp4).
+    Supports multiple outputs (images, gifs, videos, etc.)
     """
 
     COMFY_OUTPUT_PATH = os.environ.get("COMFY_OUTPUT_PATH", "/comfyui/output")
@@ -146,23 +173,24 @@ def process_output_images(outputs, job_id):
 
     output_files = []
 
-    # Gather all outputs
     for node_id, node_output in outputs.items():
-        if "images" in node_output:
-            for img in node_output["images"]:
-                output_files.append({
-                    "type": "image",
-                    "path": os.path.join(COMFY_OUTPUT_PATH, img["subfolder"], img["filename"])
-                })
-        if "videos" in node_output:
-            for vid in node_output["videos"]:
-                output_files.append({
-                    "type": "video",
-                    "path": os.path.join(COMFY_OUTPUT_PATH, vid["subfolder"], vid["filename"])
-                })
+        print(f"🔍 Node {node_id} output keys: {list(node_output.keys())}")
+
+        for key in ["images", "gifs", "videos", "output"]:
+            if key in node_output:
+                for file_obj in node_output[key]:
+                    if "filename" not in file_obj:
+                        continue
+                    file_path = os.path.join(
+                        COMFY_OUTPUT_PATH, file_obj.get("subfolder", ""), file_obj["filename"]
+                    )
+                    output_files.append({
+                        "type": "video" if key in ["videos", "output"] else "image",
+                        "path": file_path
+                    })
 
     if not output_files:
-        print("runpod-worker-comfy - no image/video outputs found")
+        print("⚠️ No image/video outputs found")
         return {"status": "error", "message": "No image or video outputs found."}
 
     results = []
@@ -202,7 +230,7 @@ def process_output_images(outputs, job_id):
                 "data": encoded
             })
 
-    # Identify main video (audio version preferred)
+    # Identify primary video (audio version preferred)
     primary_video = None
     for f in results:
         if f["type"] == "video" and "-audio" in f["filename"]:
@@ -236,7 +264,7 @@ def handler(job):
                  COMFY_API_AVAILABLE_MAX_RETRIES,
                  COMFY_API_AVAILABLE_INTERVAL_MS)
 
-    # Upload input images if provided
+    # Upload input images/videos (Base64 or via URL)
     upload_result = upload_images(images)
     if upload_result["status"] == "error":
         return upload_result
@@ -260,13 +288,13 @@ def handler(job):
             time.sleep(COMFY_POLLING_INTERVAL_MS / 1000)
             retries += 1
         else:
-            return {"error": "Max retries reached waiting for image generation"}
+            return {"error": "Max retries reached waiting for generation"}
     except Exception as e:
         return {"error": f"Error while waiting for generation: {str(e)}"}
 
-    # Process all outputs (images/videos)
+    # Process outputs (supports multiple formats)
     outputs = history[prompt_id].get("outputs", {})
-    result_files = process_output_images(outputs, job["id"])
+    result_files = process_output_files(outputs, job["id"])
 
     # Include refresh flag for RunPod
     return {**result_files, "refresh_worker": REFRESH_WORKER}
