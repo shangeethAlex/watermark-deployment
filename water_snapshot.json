@@ -8,10 +8,6 @@
         "https://github.com/jamesWalker55/comfyui-various": {
             "hash": "5bd85aaf7616878471469c4ec7e11bbd0cef3bf2",
             "disabled": false
-        },
-        "https://github.com/ltdrdata/ComfyUI-Manager.git": {
-            "hash": "af9ebc9568ebfdaf5adf7d5504678b36c46b0a67",
-            "disabled": false
         }
     },
     "cnr_custom_nodes": {
